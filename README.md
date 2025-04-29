@@ -1,6 +1,4 @@
-# Research Proposal
-
-**Author**: Qian Zhang, Maxim Beekenkamp
+- Qian Zhang, Maxim Beekenkamp
 
 ## Introduction
 
@@ -16,26 +14,26 @@ Neural ODEs are models that learn to approximate the dynamics of systems and hav
 
 ## Method
 
-Consider a continuous-time process \( X(t, x) \in \mathbb{R}^n \), where \( x \in \mathbb{R}^d \). Assume it satisfies a dynamic system:
+Consider a continuous-time process $X(t, x) \in \mathbb{R}^n$, where $x \in \mathbb{R}^d$. Assume it satisfies a dynamic system:
 
-\[
+$$
 \frac{dX(t, x)}{dt} = f(X(t, x), t)
-\]
+$$
 
-Here, \( f \) is a function that may include differential operators such as \( \nabla \) (gradient) or \( \Delta \) (Laplacian). The objective is to learn the system’s dynamics from observed data. Unlike traditional Neural ODE setups, where directly learning \( f \) with differential operators can be challenging, IAG proposes to learn the system’s dynamics implicitly through auto-regression.
+Here, $f$ is a function that may include differential operators such as $\nabla$ (gradient) or $\Delta$ (Laplacian). The objective is to learn the system’s dynamics from observed data. Unlike traditional Neural ODE setups, where directly learning $f$ with differential operators can be challenging, IAG proposes to learn the system’s dynamics implicitly through auto-regression.
 
 The inference process involves predicting the system’s state at a future time step based on prior observations:
 
-- \( (t_0, x_0, X(t_0, x_0)), (t_1, x_1, \_) \Rightarrow X(t_1, x_1) \)
-- \( (t_0, x_0, X(t_0, x_0)), (t_1, x_1, X(t_1, x_1)), (t_2, x_2, \_) \Rightarrow X(t_2, x_2) \)
-- ...
-- \( (t_0, x_0, X(t_0, x_0)), \dots, (t_n, x_n, \_) \Rightarrow X(t_n, x_n) \)
+- $(t_0, x_0, X(t_0, x_0)), (t_1, x_1, \_) \Rightarrow X(t_1, x_1)$  
+- $(t_0, x_0, X(t_0, x_0)), (t_1, x_1, X(t_1, x_1)), (t_2, x_2, \_) \Rightarrow X(t_2, x_2)$  
+- ...  
+- $(t_0, x_0, X(t_0, x_0)), \dots, (t_n, x_n, \_) \Rightarrow X(t_n, x_n)$
 
 In this framework:
 
-- \( t_i \) represents the time step.
-- \( x_i \) denotes the spatial coordinates.
-- \( X(t_i, x_i) \) is the system’s state at the given time and location.
+- $t_i$ represents the time step.  
+- $x_i$ denotes the spatial coordinates.  
+- $X(t_i, x_i)$ is the system’s state at the given time and location.
 
 The goal is to learn the system’s dynamics by sequentially predicting the next state in the sequence. A transformer model can be employed to capture these dynamics by training it on observed data, enabling it to generate accurate predictions for future states.
 
@@ -51,14 +49,14 @@ A more efficient implementation can be achieved by leveraging the Hugging Face T
 
 ### 1. Ordinary Differential Equations (ODEs)
 
-- **Simple Linear ODE**: Modeling exponential growth or decay processes.
-- **Van der Pol Oscillator**: Analyzing nonlinear oscillatory systems with applications in electrical circuits and biological rhythms.
+- **Simple Linear ODE**: Modeling exponential growth or decay processes.  
+- **Van der Pol Oscillator**: Analyzing nonlinear oscillatory systems with applications in electrical circuits and biological rhythms.  
 - **Lorenz System**: Studying chaotic systems, pertinent to meteorology and fluid dynamics.
 
 ### 2. Fluid Dynamics
 
-- **Vortex Street**: Predicting patterns in fluid flow around bluff bodies, relevant in engineering designs.
-- **Turbulent Jet Flow**: Understanding mixing processes in jet propulsion and combustion systems.
+- **Vortex Street**: Predicting patterns in fluid flow around bluff bodies, relevant in engineering designs.  
+- **Turbulent Jet Flow**: Understanding mixing processes in jet propulsion and combustion systems.  
 - **Weather Prediction**: Forecasting atmospheric conditions by modeling complex meteorological phenomena.
 
 By applying the IAG approach to these examples, the potential of LLMs in capturing and predicting complex dynamic behaviors in scientific and engineering contexts can be effectively explored.
