@@ -35,12 +35,12 @@ dropout = 0.1
 learning_rate = 0.001
 batch_size = 16
 num_epochs = 100
-max_seq_len = 64
+max_seq_len = 128
 patience = 50
 
 
 def generate_ode_data(
-    t_range: Tuple[float, float] = (0, 1), dt: float = 0.02, init_val: float = 1.0
+    t_range: Tuple[float, float] = (0, 1), dt: float = 0.01, init_val: float = 1.0
 ) -> Tuple[List[Tuple[List[List[float]], float]], np.ndarray, np.ndarray]:
     """
     Generates data from analytical solution for the ODE dx/dt = x; for x(0) = 1, t in [1,0]
@@ -143,6 +143,9 @@ class IAGTransformer(nn.Module):
 
         self.input_projection = nn.Linear(input_dim, hidden_dim)
 
+        self.positional_encoder = nn.Parameter(torch.zeros(max_seq_len, hidden_dim))
+        nn.init.normal_(self.positional_encoder, mean=0, std=0.02)
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
@@ -174,6 +177,9 @@ class IAGTransformer(nn.Module):
         """
         # Project input to hidden dimension
         x = self.input_projection(x)
+
+        seq_len = x.size(1)
+        x = x + self.positional_encoder[:seq_len, :]
 
         # Pass through transformer encoder
         # In PyTorch, attention mask works as: True = don't attend, False = attend
@@ -549,7 +555,7 @@ def main() -> None:
     plt.title("ODE Solution: dx/dt = x, x(0) = 1")
     plt.legend()
     plt.grid(True)
-    plt.savefig("iag_ode_comparison.png")
+    plt.savefig("../Data/Images/simple_ode_comparison.png")
     plt.show()
 
     # Plot training and validation loss
@@ -562,7 +568,7 @@ def main() -> None:
     plt.title("Training and Validation Loss")
     plt.legend()
     plt.grid(True)
-    plt.savefig("iag_training_validation_loss.png")
+    plt.savefig("../Data/Images/simple_ode_training_validation_loss.png")
     plt.show()
 
     console.print(
