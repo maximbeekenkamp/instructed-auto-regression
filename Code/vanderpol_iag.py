@@ -15,6 +15,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from rich.table import Table
+from scipy.integrate import solve_ivp
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 
@@ -27,7 +28,7 @@ torch.manual_seed(123)
 np.random.seed(123)
 
 # Parameters
-input_dim = 3  # (t, x_coords, X(t, x))
+input_dim = 4  # (t, x_coords, x(t), v(t)); where v(t) = dx/dt
 hidden_dim = 64
 num_layers = 2
 num_heads = 4
@@ -39,58 +40,98 @@ max_seq_len = 128
 patience = 50
 
 
-def generate_ode_data(
-    t_range: Tuple[float, float] = (0, 1), dt: float = 0.01, init_val: float = 1.0
-) -> Tuple[List[Tuple[List[List[float]], float]], np.ndarray, np.ndarray]:
+def van_der_pol_equation(t, y, mu=1.0):
     """
-    Generates data from analytical solution for the ODE dx/dt = x; for x(0) = 1, t in [1,0]
+    Van der Pol oscillator defined as a system of first-order ODEs:
+    dx/dt = v
+    dv/dt = mu*(1-x^2)*v - x
+
+    Args:
+        t: Time variable (not used in autonomous systems but required by solve_ivp)
+        y: State vector [x, v]
+        mu: Parameter controlling nonlinearity and damping
+
+    Returns:
+        dy/dt: State derivatives [dx/dt, dv/dt]
+    """
+    x, v = y
+    dxdt = v
+    dvdt = mu * (1 - x**2) * v - x
+    return [dxdt, dvdt]
+
+
+def generate_van_der_pol_data(
+    t_range: Tuple[float, float] = (0, 10),
+    dt: float = 0.05,
+    mu: float = 1.0,
+    initial_conditions: List[float] = [0.5, 0],
+) -> Tuple[List[Tuple[List[List[float]], List[float]]], np.ndarray, np.ndarray]:
+    """
+    Generates data from numerical solution for the Van der Pol oscillator
 
     Args:
         t_range: Tuple of (start, end) for time domain.
         dt: Time step size.
-        init_val: Initial value for x(0).
+        mu: Parameter controlling nonlinearity and damping of the oscillator.
+        initial_conditions: Initial values for [x(0), v(0)].
 
     Returns:
         A tuple containing:
             - sequences: List of (input_sequence, target) pairs for training.
             - times: Array of time values.
-            - X_values: Array of analytical solution values X(t).
+            - solution: Array of numerical solution values [x(t), v(t)].
     """
     times = np.arange(t_range[0], t_range[1] + dt, dt)
-    x_coords = np.zeros_like(times)  # For 1D ODE x_coords is just a placeholder
 
-    X_values = init_val * np.exp(times)
+    # Solve the ODE using scipy's solve_ivp (with RK45 method)
+    sol = solve_ivp(
+        lambda t, y: van_der_pol_equation(t, y, mu),
+        [t_range[0], t_range[1]],
+        initial_conditions,
+        method="RK45",
+        t_eval=times,
+        rtol=1e-6,
+        atol=1e-9,
+    )
+
+    x_values = sol.y[0]  # Position
+    v_values = sol.y[1]  # Velocity
+    solution = np.vstack((x_values, v_values)).T  # [time_steps, 2]
+
+    x_coords = np.zeros_like(times)
 
     sequences = []
     for i in range(len(times) - 1):
-        for seq_len in range(
-            1, min(max_seq_len + 1, i + 1)
-        ):  # Complexity scales quadratically with sequence length
+        for seq_len in range(1, min(max_seq_len + 1, i + 1)):
             if i >= seq_len:
                 input_seq = []
                 for j in range(seq_len):
                     idx = i - seq_len + j
-                    input_seq.append([times[idx], x_coords[idx], X_values[idx]])
+                    # input: [time, x_coord, x(t), v(t)]
+                    input_seq.append(
+                        [times[idx], x_coords[idx], x_values[idx], v_values[idx]]
+                    )
 
-                target = X_values[i]
+                # next state vector: [x(t), v(t)]
+                target = [x_values[i], v_values[i]]
 
                 sequences.append((input_seq, target))
 
-    return sequences, times, X_values
+    return sequences, times, solution
 
 
-class ODEDataset(Dataset):
+class VanDerPolDataset(Dataset):
     """
-    Custom PyTorch Dataset for ODE sequence data.
+    Custom PyTorch Dataset for Van der Pol sequence data.
     """
 
-    def __init__(self, sequences: List[Tuple[List[List[float]], float]]) -> None:
+    def __init__(self, sequences: List[Tuple[List[List[float]], List[float]]]) -> None:
         """
-        Initialises ODE Dataset class.
+        Initialises the dataset.
 
         Args:
-            sequences: List of (input_sequence, target_value) pairs where each input sequence is a
-            list of [time, x_coord, value] entries and target is a float.
+            sequences: List of (input_sequence, target_value) pairs where each input sequence
+                      is a list of [time, x_coord, x(t), v(t)] entries and target is [x(t+1), v(t+1)].
         """
         self.sequences = sequences
 
@@ -103,9 +144,9 @@ class ODEDataset(Dataset):
         """
         return len(self.sequences)
 
-    def __getitem__(self, idx: int) -> Tuple[List[List[float]], float]:
+    def __getitem__(self, idx: int) -> Tuple[List[List[float]], List[float]]:
         """
-        Get a specific sequence target pair.
+        Get a specific sequence-target pair.
 
         Args:
             idx: Index of the sequence to retrieve.
@@ -118,11 +159,12 @@ class ODEDataset(Dataset):
         return input_seq, target
 
 
-# Transformer Encoder Model for IAG
+# Transformer Encoder Model for IAG (modified for vector output)
 class IAGTransformer(nn.Module):
     def __init__(
         self,
         input_dim: int,
+        output_dim: int,
         hidden_dim: int,
         num_layers: int,
         num_heads: int,
@@ -133,6 +175,7 @@ class IAGTransformer(nn.Module):
 
         Args:
             input_dim: Dimension of the input features.
+            output_dim: Dimension of the output vector.
             hidden_dim: Dimension of the hidden layers.
             num_layers: Number of transformer encoder layers.
             num_heads: Number of attention heads.
@@ -156,15 +199,13 @@ class IAGTransformer(nn.Module):
             encoder_layer, num_layers=num_layers
         )
 
-        self.output_projection = nn.Linear(
-            hidden_dim, 1
-        )  # Ouput dim = 1 (predicts a single value)
+        self.output_projection = nn.Linear(hidden_dim, output_dim)
 
     def forward(
         self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Forward pass thorugh the IAGTransformer.
+        Forward pass through the IAGTransformer.
 
         Args:
             x: Input tensor of shape [batch_size, seq_len, input_dim].
@@ -172,7 +213,7 @@ class IAGTransformer(nn.Module):
                 Has shape: [batch_size, seq_len].
 
         Returns:
-            Output tensor of shape [batch_size, 1] with predictions.
+            Output tensor of shape [batch_size, output_dim] with predictions.
         """
         # Project input to hidden dimension
         x = self.input_projection(x)
@@ -182,7 +223,7 @@ class IAGTransformer(nn.Module):
 
         # Pass through transformer encoder
         # In PyTorch's attention mask: True = don't attend, False = attend
-        # Add warning filter to suppress the nested tensor warning
+        # Add warning filter to suppres the nested tensor warning
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -208,9 +249,9 @@ class IAGTransformer(nn.Module):
         return output
 
 
-# Custom collate function for padding sequences
+# Custom collate function for padding sequences (modified for vector targets)
 def collate_fn(
-    batch: List[Tuple[List[List[float]], float]],
+    batch: List[Tuple[List[List[float]], List[float]]],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Custom collate function for padding sequences of different lengths.
@@ -221,15 +262,14 @@ def collate_fn(
     Returns:
         A tuple containing:
             - padded_seqs: Tensor of padded input sequences [batch_size, max_len, input_dim].
-            - targets: Tensor of target values [batch_size, 1].
+            - targets: Tensor of target vectors [batch_size, output_dim].
             - padding_mask: Boolean mask for padding positions [batch_size, max_len].
-
     """
     batch.sort(key=lambda x: len(x[0]), reverse=True)
     sequences, targets = zip(*batch)
 
     sequences = [torch.tensor(seq, dtype=torch.float32) for seq in sequences]
-    targets = torch.tensor(targets, dtype=torch.float32).unsqueeze(1)
+    targets = torch.tensor(targets, dtype=torch.float32)  # Shape: [batch_size, 2]
 
     lengths = [seq.size(0) for seq in sequences]
     max_len = max(lengths)
@@ -364,6 +404,7 @@ def train_model(
             scheduler.step(avg_val_loss)
             current_lr = optimizer.param_groups[0]["lr"]
 
+            # Early stopping check
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 best_model_state = model.state_dict().copy()
@@ -394,26 +435,29 @@ def train_model(
 
 
 def predict_trajectory(
-    model: nn.Module, t_values: np.ndarray, x0: float = 1.0
-) -> List[float]:
-    """Predict the ODE solution trajectory using the trained model.
+    model: nn.Module, t_values: np.ndarray, initial_state: List[float] = [0.5, 0]
+) -> np.ndarray:
+    """
+    Predict the Van der Pol oscillator trajectory using the trained model.
 
     This function uses the trained model to generate a sequence of predicted values starting from
-    an initial condition x0. The model is auto-regressive with each prediction feeding bask as the
+    an initial state. The model is auto-regressive with each prediction feeding back as the
     input for the next prediction.
 
     Args:
         model: The trained IAGTransformer model.
         t_values: Array of time points.
-        x0: Initial value x(0).
+        initial_state: Initial state [x(0), v(0)].
 
     Returns:
-        A list of predicted values corresponding to each time point in t_values.
+        An array of predicted state vectors corresponding to each time point in t_values.
     """
     model.eval()
-    predictions = [x0]
+    predictions = [initial_state]
 
-    current_sequence = [[0.0, 0.0, x0]]  # [t, x_coords, X(t)]
+    current_sequence = [
+        [0.0, 0.0, initial_state[0], initial_state[1]]
+    ]  # [t, x_coords, x(t), v(t)]
 
     console = Console()
     with Progress(
@@ -432,32 +476,70 @@ def predict_trajectory(
                 # No padding mask needed because we're not batching
                 mask = None
 
-                next_value = model(input_tensor, mask).item()
-                predictions.append(next_value)
+                next_state = model(input_tensor, mask).squeeze().tolist()
+                if not isinstance(next_state, list):  # Handle scalar case
+                    next_state = [next_state, 0.0]
 
-                current_sequence.append([t, 0.0, next_value])
+                predictions.append(next_state)
+
+                current_sequence.append([t, 0.0, next_state[0], next_state[1]])
 
                 if len(current_sequence) > max_seq_len:
                     current_sequence = current_sequence[-max_seq_len:]
 
                 progress.update(prediction_task, advance=1)
 
-    return predictions
+    return np.array(predictions)
+
+
+def plot_phase_space(true_solution: np.ndarray, predicted_solution: np.ndarray) -> None:
+    """
+    Plot the phase space diagram comparing the true and predicted solutions.
+
+    Args:
+        true_solution: Array of true state vectors [x(t), v(t)].
+        predicted_solution: Array of predicted state vectors [x(t), v(t)].
+    """
+    plt.figure(figsize=(10, 8))
+    plt.plot(true_solution[:, 0], true_solution[:, 1], "b-", label="True Solution")
+    plt.plot(
+        predicted_solution[:, 0],
+        predicted_solution[:, 1],
+        "r--",
+        label="IAG Predictions",
+    )
+    plt.xlabel("Position (x)")
+    plt.ylabel("Velocity (v)")
+    plt.title("Van der Pol Oscillator - Phase Space")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("../Data/Images/van_der_pol_phase_space.png")
+    plt.show()
 
 
 def main() -> None:
-    """Main execution.
+    """
+    Main execution.
 
-    Orchestrates the entire workflow.
-        1. Generate training data
+    Orchestrates the entire workflow:
+        1. Generate training data for the Van der Pol oscillator
         2. Create and train the IAGTransformer model
         3. Generate predictions and visualise results
     """
     console = Console()
-    console.print("[bold magenta]ODE Solution with Implicit Attention Guidance[/]")
+    console.print(
+        "[bold magenta]Van der Pol Oscillator with Implicit Attention Guidance[/]"
+    )
+
+    # Model parameters
+    mu = 1.0  # Standard van der Pol parameter
+    initial_state = [0.5, 0]  # Initial x(0) and v(0)
+    output_dim = 2  # x and v components
 
     with console.status("[bold green]Generating training data..."):
-        sequences, times, true_values = generate_ode_data()
+        sequences, times, true_solution = generate_van_der_pol_data(
+            t_range=(0, 10), dt=0.05, mu=mu, initial_conditions=initial_state
+        )
 
     console.print(f"[bold green][/]Generated {len(sequences)} training sequences")
 
@@ -468,8 +550,8 @@ def main() -> None:
     console.print(f"[bold]Training set:[/] {len(train_sequences)} sequences")
     console.print(f"[bold]Validation set:[/] {len(val_sequences)} sequences")
 
-    train_dataset = ODEDataset(train_sequences)
-    val_dataset = ODEDataset(val_sequences)
+    train_dataset = VanDerPolDataset(train_sequences)
+    val_dataset = VanDerPolDataset(val_sequences)
 
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn
@@ -487,20 +569,26 @@ def main() -> None:
         sample_table = Table(title="First 3 entries of first sequence")
         sample_table.add_column("Time")
         sample_table.add_column("X Coord")
-        sample_table.add_column("Value")
+        sample_table.add_column("Position (x)")
+        sample_table.add_column("Velocity (v)")
 
         for i in range(min(3, inputs.shape[1])):
             sample_table.add_row(
                 f"{inputs[0][i][0]:.4f}",
                 f"{inputs[0][i][1]:.4f}",
                 f"{inputs[0][i][2]:.4f}",
+                f"{inputs[0][i][3]:.4f}",
             )
 
         console.print(sample_table)
-        console.print(f"Sample target: {targets[0].item():.4f}")
+        console.print(
+            f"Sample target: Position={targets[0][0]:.4f}, Velocity={targets[0][1]:.4f}"
+        )
         break
 
-    model = IAGTransformer(input_dim, hidden_dim, num_layers, num_heads, dropout)
+    model = IAGTransformer(
+        input_dim, output_dim, hidden_dim, num_layers, num_heads, dropout
+    )
     model_params = sum(p.numel() for p in model.parameters())
     console.print(f"[bold]Model parameters:[/] {model_params:,}")
 
@@ -526,21 +614,37 @@ def main() -> None:
 
     console.print("\n[bold yellow]Generating Predictions...[/]")
 
-    predictions = predict_trajectory(model, times)
+    predicted_solution = predict_trajectory(model, times, initial_state)
 
-    console.print("\n[bold green]Creating visualisations...[/]")
+    console.print("\n[bold green]Creating visualizations...[/]")
 
-    # Plot results
-    plt.figure(figsize=(10, 6))
-    plt.plot(times, true_values, "b-", label="True Solution (e^t)")
-    plt.plot(times, predictions, "r--", label="IAG Predictions")
-    plt.xlabel("Time (t)")
-    plt.ylabel("X(t)")
-    plt.title("ODE Solution: dx/dt = x, x(0) = 1")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("../Data/Images/simple_ode_comparison.png")
+    # Plot time series for position and velocity
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+
+    # Position plot
+    ax1.plot(times, true_solution[:, 0], "b-", label="True Position")
+    ax1.plot(times, predicted_solution[:, 0], "r--", label="Predicted Position")
+    ax1.set_xlabel("Time (t)")
+    ax1.set_ylabel("Position (x)")
+    ax1.set_title("Van der Pol Oscillator - Position")
+    ax1.legend()
+    ax1.grid(True)
+
+    # Velocity plot
+    ax2.plot(times, true_solution[:, 1], "b-", label="True Velocity")
+    ax2.plot(times, predicted_solution[:, 1], "r--", label="Predicted Velocity")
+    ax2.set_xlabel("Time (t)")
+    ax2.set_ylabel("Velocity (v)")
+    ax2.set_title("Van der Pol Oscillator - Velocity")
+    ax2.legend()
+    ax2.grid(True)
+
+    plt.tight_layout()
+    plt.savefig("../Data/Images/van_der_pol_time_series.png")
     plt.show()
+
+    # Plot phase space
+    plot_phase_space(true_solution, predicted_solution)
 
     # Plot training and validation loss
     plt.figure(figsize=(10, 6))
@@ -552,11 +656,12 @@ def main() -> None:
     plt.title("Training and Validation Loss")
     plt.legend()
     plt.grid(True)
-    plt.savefig("../Data/Images/simple_ode_training_validation_loss.png")
+    plt.savefig("../Data/Images/van_der_pol_training_validation_loss.png")
     plt.show()
 
     console.print(
-        "\n[bold green]Done. Saved plots as iag_ode_comparison.png and iag_training_validation_loss.png[/]"
+        "\n[bold green]Done. Saved plots as van_der_pol_phase_space.png, "
+        "van_der_pol_time_series.png, and van_der_pol_training_validation_loss.png[/]"
     )
 
 
